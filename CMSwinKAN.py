@@ -642,7 +642,20 @@ class BasicLayer(nn.Module):
                     slice(-self.window_size, -self.shift_size),
                     slice(-self.shift_size, None))
         w_slices = (slice(0, -self.window_size),
-        return x, H, W
+                    slice(-self.window_size, -self.shift_size),
+                    slice(-self.shift_size, None))
+        cnt = 0
+        for h in h_slices:
+            for w in w_slices:
+                img_mask[:, h, w, :] = cnt
+                cnt += 1
+
+        mask_windows = window_partition(img_mask, self.window_size)  # [nW, Mh, Mw, 1]
+        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)  # [nW, Mh*Mw]
+        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)  # [nW, 1, Mh*Mw] - [nW, Mh*Mw, 1]
+        # [nW, Mh*Mw, Mh*Mw]
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
+        return attn_mask
 
 class SwinKANsformerBlock(nn.Module):
         self.norm2 = norm_layer(dim)
