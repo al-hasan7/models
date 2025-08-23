@@ -10,6 +10,7 @@ from typing import Optional
 #from resnet import resnet50
 import torch.nn.functional as F
 from models import EfficientKAN
+from models.EfficientKAN import KAN, KANLinear
 import torch.utils.checkpoint as checkpoint
 
 #sys.path.append(os.path.abspath('CMSwinKAN/src'))
