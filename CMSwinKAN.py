@@ -658,9 +658,41 @@ class BasicLayer(nn.Module):
         return attn_mask
 
 class SwinKANsformerBlock(nn.Module):
+    r""" Swin KANsformer Block.
+
+    Args:
+        dim (int): Number of input channels.
+        num_heads (int): Number of attention heads.
+        window_size (int): Window size.
+        shift_size (int): Shift size for SW-MSA.
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
+        drop (float, optional): Dropout rate. Default: 0.0
+        attn_drop (float, optional): Attention dropout rate. Default: 0.0
+        drop_path (float, optional): Stochastic depth rate. Default: 0.0
+        act_layer (nn.Module, optional): Activation layer. Default: nn.GELU
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+    """
+
+    def __init__(self, dim, num_heads, window_size=7, shift_size=0,
+                 mlp_ratio=4., qkv_bias=True, drop=0., attn_drop=0., drop_path=0.,
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.shift_size = shift_size
+        self.mlp_ratio = mlp_ratio
+        assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
+
+        self.norm1 = norm_layer(dim)
+        self.attn = WindowAttention(
+            dim, window_size=(self.window_size, self.window_size), num_heads=num_heads, qkv_bias=qkv_bias,
+            attn_drop=attn_drop, proj_drop=drop)
+
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
-        
-        # Replace MLP with KAN
+        # Replaced MLP with KAN
         self.kan = KAN([dim, 16, dim])
 
     def forward(self, x, attn_mask):
@@ -704,7 +736,7 @@ class SwinKANsformerBlock(nn.Module):
             x = shifted_x
 
         if pad_r > 0 or pad_b > 0:
-            # Remove the padded data from the front
+            # Remove the padded data
             x = x[:, :H, :W, :].contiguous()
 
         x = x.view(B, H * W, C)
@@ -715,10 +747,10 @@ class SwinKANsformerBlock(nn.Module):
         # Flatten the input tensor
         x_flat = x.view(B * H * W, C)
         
-        # Through KAN module
+        # Pass through the KAN module
         x_kan = self.drop_path(self.kan(self.norm2(x_flat)))
         
-        # Restore tensor shape
+        # Restore the tensor shape
         x_kan = x_kan.view(B, H * W, C)
         
         x = x + x_kan
@@ -727,25 +759,132 @@ class SwinKANsformerBlock(nn.Module):
 
 
 class Multi_Swin_KANsformer(nn.Module):
-                # feature_map = feature_map * self.stage_weights[i]
+    r""" Swin Transformer
+        A PyTorch implementation of: `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows` - 
+        <url id="cuhh8q2i5976le9gfh70" type="url" status="parsed" title="" wc="68098">https://arxiv.org/pdf/2103.14030</url> 
+
+    Args:
+        patch_size (int | tuple(int)): Patch size. Default: 4
+        in_chans (int): Number of input image channels. Default: 3
+        num_classes (int): Number of classes for classification head. Default: 1000
+        embed_dim (int): Patch embedding dimension. Default: 96
+        depths (tuple(int)): Depth of each Swin Transformer layer.
+        num_heads (tuple(int)): Number of attention heads in different layers.
+        window_size (int): Window size. Default: 7
+        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim. Default: 4
+        qkv_bias (bool): If True, add a learnable bias to query, key, value. Default: True
+        drop_rate (float): Dropout rate. Default: 0
+        attn_drop_rate (float): Attention dropout rate. Default: 0
+        drop_path_rate (float): Stochastic depth rate. Default: 0.1
+        norm_layer (nn.Module): Normalization layer. Default: nn.LayerNorm.
+        patch_norm (bool): If True, add normalization after patch embedding. Default: True
+        use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False
+    """
+
+    def __init__(self, patch_size=4, in_chans=3, num_classes=1000,
+                 embed_dim=96, depths=(2, 2, 6, 2), num_heads=(3, 6, 12, 24),
+                 window_size=7, mlp_ratio=4., qkv_bias=True,
+                 drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
+                 norm_layer=nn.LayerNorm, patch_norm=True,
+                 use_checkpoint=False, device='cpu', **kwargs):
+        super().__init__()
+        self.window_size = window_size
+        self.num_classes = num_classes
+        self.num_layers = len(depths)
+        self.embed_dim = embed_dim
+        self.patch_norm = patch_norm
+        self.device = device
+        self.num_features = int(embed_dim * 2 ** (self.num_layers - 1))
+
+        # Split image into non-overlapping patches
+        self.patch_embed = PatchEmbed(
+            patch_size=patch_size, in_c=in_chans, embed_dim=embed_dim,
+            norm_layer=norm_layer if self.patch_norm else None)
+        self.pos_drop = nn.Dropout(p=drop_rate)
+
+        # Stochastic depth
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
+
+        # Build layers
+        self.layers = nn.ModuleList()
+        for i_layer in range(self.num_layers):
+            layers = BasicLayer(dim=int(embed_dim * 2 ** i_layer),
+                                depth=depths[i_layer],
+                                num_heads=num_heads[i_layer],
+                                window_size=window_size,
+                                mlp_ratio=mlp_ratio,
+                                qkv_bias=qkv_bias,
+                                drop=drop_rate,
+                                attn_drop=attn_drop_rate,
+                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
+                                norm_layer=norm_layer,
+                                downsample=PatchMerging if (i_layer < self.num_layers - 1) else None,
+                                use_checkpoint=use_checkpoint)
+            self.layers.append(layers)
+
+        self.norm = norm_layer(self.num_features)
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.stage_weights = nn.Parameter(torch.ones(self.num_layers))
+
+        # Contrast-Driven Feature Aggregation module (CDFA)
+        self.cd_fa = ContrastDrivenFeatureAggregation(
+                                            in_c=int(embed_dim * 2 ** 1),
+                                            dim=int(embed_dim * 2 ** 1),
+                                            num_heads=num_heads[0],
+                                            kernel_size=3,
+                                            padding=1,
+                                            stride=1,
+                                            attn_drop=attn_drop_rate,
+                                            proj_drop=drop_rate
+                                        )
+
+        # Classification head (using KAN instead of linear layer)
+        self.head = KAN([self.num_features, 16, num_classes]) if num_classes > 0 else nn.Identity()
+        #self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def forward_features(self, x):
+        B, H, W, C = x.shape
+        x, H, W = self.patch_embed(x)
+        x = self.pos_drop(x)
+
+        multi_scale_features = []  # Store multi-scale features
+        resolutions = []  # Record resolutions at each stage
+
+        for i, layer in enumerate(self.layers):
+            x, H, W = layer(x, H, W)
+            resolutions.append((H, W))  
+            # Collect features from the first N-1 layers (excluding the last one)
+            if i < self.num_layers - 1:
+                feature_map = x.view(x.shape[0], H, W, -1).permute(0, 3, 1, 2)
+                #feature_map = feature_map * self.stage_weights[i]
                 multi_scale_features.append(feature_map)
         
-        # ============= Feature Fusion ============ #
+        #============= Feature Fusion Section ============#
         if len(multi_scale_features) > 0:
-            # 1. Align all resolutions to the first layer's resolution
-            first_H, first_W = resolutions[0]   # Resolution of the first layer feature map
+            # 1. Uniform resolution to the size of the first layer's output
+            first_H, first_W = resolutions[0]   # First layer feature map size
             for i in range(len(multi_scale_features)):
-                # Perform bilinear interpolation to adjust feature map size
+                # Resize feature maps using bilinear interpolation
                 multi_scale_features[i] = F.interpolate(
                     multi_scale_features[i],
                     size=(first_H, first_W),
                     mode='bilinear',
                     align_corners=True
                 )
-            # 2. Adjust channel dimensions to match CDFA input
+            # 2. Adjust the number of channels to match CDFA input
             for i in range(len(multi_scale_features)):
                 if multi_scale_features[i].shape[1] != self.cd_fa.in_c:
-                    # Use 1x1 convolution to adjust channels
+                    # Adjust channels using a 1x1 convolution
                     adjust_conv = nn.Conv2d(
                         in_channels=multi_scale_features[i].shape[1],
                         out_channels=self.cd_fa.in_c,
@@ -756,9 +895,9 @@ class Multi_Swin_KANsformer(nn.Module):
                     multi_scale_features[i] = adjust_conv(multi_scale_features[i])
             # 3. Contrast-Driven Feature Aggregation (CDFA)
             fused_multi_scale_features = self.cd_fa(
-                        multi_scale_features[0],    # First layer feature
-                        multi_scale_features[1],    # Second layer feature
-                        multi_scale_features[2]     # Third layer feature
+                        multi_scale_features[0],    # First layer features
+                        multi_scale_features[1],    # Second layer features
+                        multi_scale_features[2]     # Third layer features
                     )
 
             # 4. Adjust fused features to match the final output
@@ -766,19 +905,94 @@ class Multi_Swin_KANsformer(nn.Module):
             fused_multi_scale_features = fused_multi_scale_features.flatten(2).transpose(1, 2)
             
             fused_multi_scale_features = fused_multi_scale_features.view(B, -1, self.num_features)  # [B, L, C] 
-            # Restore shape and add it to the original features
+            # Restore shape and add to original features
             B, H_f, W_f = fused_multi_scale_features.shape
             fused_multi_scale_features = fused_multi_scale_features.view(B, H_f, W_f, -1).permute(0, 3, 1, 2)  # [B, C, H, W]
-            # Interpolate to match the final layer resolution
+            # Resize to network's final layer resolution
             fused_multi_scale_features = F.interpolate(
                                     fused_multi_scale_features,
                                     size=(H, W), mode='bilinear', 
                                     align_corners=True
                                 )
             fused_multi_scale_features = fused_multi_scale_features.flatten(2).transpose(1, 2)  # [B, L, C]
-        # 5. Add residual connections to enhance features
-        x = x + fused_multi_scale_features  # Add fused features to the original output
-        # ========== Classification Part ========== #
+        # 5. Residual connection enhances features
+        x = x + fused_multi_scale_features  # Add fused features to original output
+        #========== Classification Section ==========#
+        x = self.norm(x)    # Layer normalization
+        x = self.avgpool(x.transpose(1, 2)) # Global average pooling [B, C, 1]
+        x = torch.flatten(x, 1) # Flatten [B, C]
+
+        # Apply the classification head
+        #x = self.head(x)    # No KAN classification head
+
+        return x
+
+    def forward(self, x):
+        B, H, W, C = x.shape
+        x, H, W = self.patch_embed(x)
+        x = self.pos_drop(x)
+
+        multi_scale_features = []  # Store multi-scale features
+        resolutions = []  # Record resolutions at each stage
+
+        for i, layer in enumerate(self.layers):
+            x, H, W = layer(x, H, W)
+            resolutions.append((H, W))  
+            # Collect features from the first N-1 layers (excluding the last one)
+            if i < self.num_layers - 1:
+                feature_map = x.view(x.shape[0], H, W, -1).permute(0, 3, 1, 2)
+                #feature_map = feature_map * self.stage_weights[i]
+                multi_scale_features.append(feature_map)
+        
+        #============= Feature Fusion Section ============#
+        if len(multi_scale_features) > 0:
+            # 1. Uniform resolution to the size of the first layer's output
+            first_H, first_W = resolutions[0]   # First layer feature map size
+            for i in range(len(multi_scale_features)):
+                # Resize feature maps using bilinear interpolation
+                multi_scale_features[i] = F.interpolate(
+                    multi_scale_features[i],
+                    size=(first_H, first_W),
+                    mode='bilinear',
+                    align_corners=True
+                )
+            # 2. Adjust the number of channels to match CDFA input
+            for i in range(len(multi_scale_features)):
+                if multi_scale_features[i].shape[1] != self.cd_fa.in_c:
+                    # Adjust channels using a 1x1 convolution
+                    adjust_conv = nn.Conv2d(
+                        in_channels=multi_scale_features[i].shape[1],
+                        out_channels=self.cd_fa.in_c,
+                        kernel_size=1,
+                        stride=1,
+                        bias=False
+                    ).to(self.device)
+                    multi_scale_features[i] = adjust_conv(multi_scale_features[i])
+            # 3. Contrast-Driven Feature Aggregation (CDFA)
+            fused_multi_scale_features = self.cd_fa(
+                        multi_scale_features[0],    # First layer features
+                        multi_scale_features[1],    # Second layer features
+                        multi_scale_features[2]     # Third layer features
+                    )
+
+            # 4. Adjust fused features to match the final output
+            # Flatten and transpose [B, C, H, W] -> [B, L, C]
+            fused_multi_scale_features = fused_multi_scale_features.flatten(2).transpose(1, 2)
+            
+            fused_multi_scale_features = fused_multi_scale_features.view(B, -1, self.num_features)  # [B, L, C] 
+            # Restore shape and add to original features
+            B, H_f, W_f = fused_multi_scale_features.shape
+            fused_multi_scale_features = fused_multi_scale_features.view(B, H_f, W_f, -1).permute(0, 3, 1, 2)  # [B, C, H, W]
+            # Resize to network's final layer resolution
+            fused_multi_scale_features = F.interpolate(
+                                    fused_multi_scale_features,
+                                    size=(H, W), mode='bilinear', 
+                                    align_corners=True
+                                )
+            fused_multi_scale_features = fused_multi_scale_features.flatten(2).transpose(1, 2)  # [B, L, C]
+        # 5. Residual connection enhances features
+        x = x + fused_multi_scale_features  # Add fused features to original output
+        #========== Classification Section ==========#
         x = self.norm(x)    # Layer normalization
         x = self.avgpool(x.transpose(1, 2)) # Global average pooling [B, C, 1]
         x = torch.flatten(x, 1) # Flatten [B, C]
@@ -787,7 +1001,6 @@ class Multi_Swin_KANsformer(nn.Module):
         x = self.head(x)    # KAN classification head
 
         return x
-
 
 def multi_swin_kan_tiny_patch4_window7_224(num_classes: int = 1000, **kwargs):
     model = Multi_Swin_KANsformer(in_chans=3,
