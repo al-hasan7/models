@@ -5,11 +5,11 @@ import torch.nn.functional as F
 import math
 
 """
-1. Improved memory efficiency: The original implementation required expanding all intermediate variables to execute different activation functions, but this code restructures the computation to use different basis functions to activate inputs, and then linearly combines them. This restructuring significantly reduces memory costs and makes the computation more efficient.
+1. Memory efficiency improvement: The original implementation requires expanding all intermediate variables to execute different activation functions, whereas this code reformulates the computation to use different basis functions to activate the input, and then linearly combines them. This reformulation can significantly reduce memory costs and make the computation more efficient.
 
-2. Change in regularization method: The L1 regularization used in the original implementation requires nonlinear operations on tensors, which is incompatible with the restructured computation. Therefore, this code changes L1 regularization to apply to the weights, which aligns with commonly used regularization methods in neural networks and is compatible with the restructured computation.
+2. Change in regularization method: The L1 regularization used in the original implementation requires nonlinear operations on tensors, which is incompatible with the reformulated computation. Therefore, in this code, L1 regularization is applied to the weights, which is a more common regularization method in neural networks and compatible with the reformulated computation.
 
-3. Activation function scaling option: The original implementation included a learnable scale for each activation function, but this library offers an option to disable this feature. Disabling the scaling can make the model more efficient, but it may affect the results.
+3. Activation function scaling option: The original implementation includes a learnable scaling factor for each activation function, but this library provides an option to disable this feature. Disabling scaling can make the model more efficient, but may affect the results.
 
 4. Change in parameter initialization: To address performance issues on the MNIST dataset, this code modifies the parameter initialization method to use Kaiming initialization.
 """
@@ -20,10 +20,10 @@ class KANLinear(torch.nn.Module):
         in_features,
         out_features,
         grid_size=5,  # Grid size, default is 5
-        spline_order=3, # Degree of the piecewise polynomial, default is 3
+        spline_order=3, # Order of the piecewise polynomial, default is 3
         scale_noise=0.1,  # Scaling noise, default is 0.1
         scale_base=1.0,   # Base scaling, default is 1.0
-        scale_spline=1.0,    # Scaling of piecewise polynomials, default is 1.0
+        scale_spline=1.0,    # Scaling for piecewise polynomial, default is 1.0
         enable_standalone_scale_spline=True,
         base_activation=torch.nn.SiLU,  # Base activation function, default is SiLU (Sigmoid Linear Unit)
         grid_eps=0.02,
@@ -32,10 +32,10 @@ class KANLinear(torch.nn.Module):
         super(KANLinear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.grid_size = grid_size  # Set the grid size and degree of piecewise polynomials
+        self.grid_size = grid_size # Set grid size and order of piecewise polynomial
         self.spline_order = spline_order
 
-        h = (grid_range[1] - grid_range[0]) / grid_size   # Calculate the grid step size
+        h = (grid_range[1] - grid_range[0]) / grid_size   # Calculate grid step size
         grid = ( # Generate grid
             (
                 torch.arange(-spline_order, grid_size + spline_order + 1) * h
@@ -50,12 +50,12 @@ class KANLinear(torch.nn.Module):
         self.spline_weight = torch.nn.Parameter(
             torch.Tensor(out_features, in_features, grid_size + spline_order)
         )
-        if enable_standalone_scale_spline:  # If standalone piecewise polynomial scaling is enabled, initialize scaling parameters
+        if enable_standalone_scale_spline:  # If standalone piecewise polynomial scaling is enabled, initialize scaling parameters for piecewise polynomial
             self.spline_scaler = torch.nn.Parameter(
                 torch.Tensor(out_features, in_features)
             )
 
-        self.scale_noise = scale_noise # Store scaling noise, base scaling, piecewise polynomial scaling, whether to enable standalone scaling, base activation function, and grid tolerance
+        self.scale_noise = scale_noise # Store scaling noise, base scaling, piecewise polynomial scaling, whether to enable standalone piecewise polynomial scaling, base activation function, and grid range tolerance
         self.scale_base = scale_base
         self.scale_spline = scale_spline
         self.enable_standalone_scale_spline = enable_standalone_scale_spline
@@ -75,7 +75,7 @@ class KANLinear(torch.nn.Module):
                 * self.scale_noise
                 / self.grid_size
             )
-            self.spline_weight.data.copy_( # Calculate piecewise polynomial weights
+            self.spline_weight.data.copy_( # Compute piecewise polynomial weights
                 (self.scale_spline if not self.enable_standalone_scale_spline else 1.0)
                 * self.curve2coeff(
                     self.grid.T[self.spline_order : -self.spline_order],
@@ -83,7 +83,6 @@ class KANLinear(torch.nn.Module):
                 )
             )
             if self.enable_standalone_scale_spline:  # If standalone piecewise polynomial scaling is enabled, use Kaiming uniform initialization for scaling parameters
-                # torch.nn.init.constant_(self.spline_scaler, self.scale_spline)
                 torch.nn.init.kaiming_uniform_(self.spline_scaler, a=math.sqrt(5) * self.scale_spline)
 
     def b_splines(self, x: torch.Tensor):
@@ -98,7 +97,7 @@ class KANLinear(torch.nn.Module):
         """
         assert x.dim() == 2 and x.size(1) == self.in_features
 
-        grid: torch.Tensor = ( # Shape (in_features, grid_size + 2 * spline_order + 1)
+        grid: torch.Tensor = ( # Shape is (in_features, grid_size + 2 * spline_order + 1)
             self.grid
         )  # (in_features, grid_size + 2 * spline_order + 1)
         x = x.unsqueeze(-1)
@@ -136,15 +135,15 @@ class KANLinear(torch.nn.Module):
         assert y.size() == (x.size(0), self.in_features, self.out_features)
         # Compute B-spline bases
         A = self.b_splines(x).transpose(
-            0, 1 # Shape (in_features, batch_size, grid_size + spline_order)
+            0, 1 # Shape is (in_features, batch_size, grid_size + spline_order)
         )  # (in_features, batch_size, grid_size + spline_order)
-        B = y.transpose(0, 1)  # (in_features, batch_size, out_features) # Shape (in_features, batch_size, out_features)
-        solution = torch.linalg.lstsq(   # Use least squares to solve the linear equation
+        B = y.transpose(0, 1)  # Shape is (in_features, batch_size, out_features)
+        solution = torch.linalg.lstsq(   # Solve linear equations using least squares
             A, B
-        ).solution  # (in_features, grid_size + spline_order, out_features)  # Shape (in_features, grid_size + spline_order, out_features)
-        result = solution.permute( # Adjust the result's dimension order
+        ).solution  # Shape is (in_features, grid_size + spline_order, out_features)
+        result = solution.permute( # Adjust result dimension order
             2, 0, 1
-        )  # (out_features, in_features, grid_size + spline_order)
+        )  # Shape is (out_features, in_features, grid_size + spline_order)
 
         assert result.size() == (
             self.out_features,
@@ -159,7 +158,7 @@ class KANLinear(torch.nn.Module):
         Get the scaled piecewise polynomial weights.
 
         Returns:
-        torch.Tensor: Scaled piecewise polynomial weight tensor, same shape as self.spline_weight.
+        torch.Tensor: Scaled piecewise polynomial weights tensor, same shape as self.spline_weight.
         """
         return self.spline_weight * (
             self.spline_scaler.unsqueeze(-1)
@@ -167,7 +166,7 @@ class KANLinear(torch.nn.Module):
             else 1.0
         )
 
-    def forward(self, x: torch.Tensor):  # Pass input through the model's layers with linear transformations and activation functions to get the output
+    def forward(self, x: torch.Tensor): # Pass input through model layers, perform linear transformations and activation function to get the output
         """
         Forward pass function.
 
@@ -182,27 +181,27 @@ class KANLinear(torch.nn.Module):
             print('in'+str(self.in_features))
         assert x.dim() == 2 and x.size(1) == self.in_features
 
-        base_output = F.linear(self.base_activation(x), self.base_weight)  # Compute the output of the base linear layer
-        spline_output = F.linear( # Compute the output of the piecewise polynomial linear layer
+        base_output = F.linear(self.base_activation(x), self.base_weight) # Compute base linear layer output
+        spline_output = F.linear( # Compute piecewise polynomial linear layer output
             self.b_splines(x).view(x.size(0), -1),
             self.scaled_spline_weight.view(self.out_features, -1),
         )
-        return base_output + spline_output  # Return the sum of the base linear layer output and piecewise polynomial linear layer output
+        return base_output + spline_output  # Return sum of base linear layer output and piecewise polynomial linear layer output
 
     @torch.no_grad()
     # Update the grid.
     # Args:
     # x (torch.Tensor): Input tensor of shape (batch_size, in_features).
-    # margin (float): The size of the grid edge margin. Default is 0.01.
-    # Dynamically update the grid based on the distribution of input data x, allowing the model to better adapt to the input distribution and improve its expressive power and generalization.
+    # margin (float): Grid margin size. Default is 0.01.
+    # Dynamically update the model grid based on the input data x's distribution, allowing the model to better fit the data distribution and improve its expressive and generalization ability.
     def update_grid(self, x: torch.Tensor, margin=0.01): 
         assert x.dim() == 2 and x.size(1) == self.in_features
         batch = x.size(0)
 
         splines = self.b_splines(x)  # (batch, in, coeff)  # Compute B-spline bases
-        splines = splines.permute(1, 0, 2)  # (in, batch, coeff)  # Adjust dimensions to (in, batch, coeff)
+        splines = splines.permute(1, 0, 2)  # (in, batch, coeff)  # Adjust dimension order to (in, batch, coeff)
         orig_coeff = self.scaled_spline_weight  # (out, in, coeff)
-        orig_coeff = orig_coeff.permute(1, 2, 0)  # (in, coeff, out)  # Adjust dimensions to (in, coeff, out)
+        orig_coeff = orig_coeff.permute(1, 2, 0)  # (in, coeff, out)  # Adjust dimension order to (in, coeff, out)
         unreduced_spline_output = torch.bmm(splines, orig_coeff)  # (in, batch, out)
         unreduced_spline_output = unreduced_spline_output.permute(
             1, 0, 2
@@ -240,17 +239,22 @@ class KANLinear(torch.nn.Module):
             dim=0,
         )
 
-        self.grid.copy_(grid.T)   # Update the grid and piecewise polynomial weights
+        self.grid.copy_(grid.T)   # Update grid and piecewise polynomial weights
         self.spline_weight.data.copy_(self.curve2coeff(x, unreduced_spline_output))
 
     def regularization_loss(self, regularize_activation=1.0, regularize_entropy=1.0):
-        # Compute regularization loss to constrain the model's parameters and prevent overfitting
+        # Calculate regularization loss to constrain the model's parameters and prevent overfitting
         """
         Compute the regularization loss.
 
-        This is a simple simulation of the original L1 regularization, as the original requires computing absolutes and entropy from the expanded (batch, in_features, out_features) intermediate tensor, which is hidden behind the F.linear function for memory efficiency.
+        This is a dumb simulation of the original L1 regularization as stated in the
+        paper, since the original one requires computing absolutes and entropy from the
+        expanded (batch, in_features, out_features) intermediate tensor, which is hidden
+        behind the F.linear function if we want a memory efficient implementation.
 
-        The L1 regularization is now computed as the mean absolute value of the spline weights. The author's implementation also includes this term in addition to the sample-based regularization.
+        The L1 regularization is now computed as the mean absolute value of the spline
+        weights. The author's implementation also includes this term in addition to the
+        sample-based regularization.
         """
         l1_fake = self.spline_weight.abs().mean(-1)
         regularization_loss_activation = l1_fake.sum()
@@ -262,7 +266,7 @@ class KANLinear(torch.nn.Module):
         )
 
 
-class KAN(torch.nn.Module): # Encapsulates a KAN neural network model that can be used for data fitting and prediction.
+class KAN(torch.nn.Module): # Encapsulates a KAN neural network model for fitting and predicting data.
     def __init__(
         self,
         layers_hidden,
@@ -281,10 +285,10 @@ class KAN(torch.nn.Module): # Encapsulates a KAN neural network model that can b
         Args:
             layers_hidden (list): List containing the number of input features for each hidden layer.
             grid_size (int): Grid size, default is 5.
-            spline_order (int): Degree of the piecewise polynomial, default is 3.
+            spline_order (int): Order of the piecewise polynomial, default is 3.
             scale_noise (float): Scaling noise, default is 0.1.
             scale_base (float): Base scaling, default is 1.0.
-            scale_spline (float): Scaling of piecewise polynomials, default is 1.0.
+            scale_spline (float): Scaling for piecewise polynomial, default is 1.0.
             base_activation (torch.nn.Module): Base activation function, default is SiLU.
             grid_eps (float): Grid adjustment parameter, default is 0.02.
             grid_range (list): Grid range, default is [-1, 1].
@@ -310,7 +314,7 @@ class KAN(torch.nn.Module): # Encapsulates a KAN neural network model that can b
                 )
             )
 
-    def forward(self, x: torch.Tensor, update_grid=False): # Call the forward method of each KANLinear layer for the forward pass.
+    def forward(self, x: torch.Tensor, update_grid=False): # Call each KANLinear layer's forward method to perform the forward pass.
         """
         Forward pass function.
 
@@ -327,13 +331,13 @@ class KAN(torch.nn.Module): # Encapsulates a KAN neural network model that can b
             x = layer(x)
         return x
 
-    def regularization_loss(self, regularize_activation=1.0, regularize_entropy=1.0): # Method to calculate regularization loss to constrain the model's parameters and prevent overfitting.
+    def regularization_loss(self, regularize_activation=1.0, regularize_entropy=1.0): # Compute regularization loss to constrain the model's parameters and prevent overfitting.
         """
         Compute the regularization loss.
 
         Args:
-            regularize_activation (float): Regularization weight for activation, default is 1.0.
-            regularize_entropy (float): Regularization weight for entropy, default is 1.0.
+            regularize_activation (float): Weight for regularizing activation, default is 1.0.
+            regularize_entropy (float): Weight for regularizing entropy, default is 1.0.
 
         Returns:
             torch.Tensor: Regularization loss.
