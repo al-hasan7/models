@@ -541,7 +541,6 @@ class PatchMerging(nn.Module):
 
         return x
 
-
 class WindowAttention(nn.Module):
     r""" Window based multi-head self attention (W-MSA) module with relative position bias.
     It supports both of shifted and non-shifted window.
@@ -637,6 +636,7 @@ class WindowAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+
 class BasicLayer(nn.Module):
     """
     A basic Swin Transformer layer for one stage.
@@ -712,6 +712,20 @@ class BasicLayer(nn.Module):
         # [nW, Mh*Mw, Mh*Mw]
         attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
         return attn_mask
+
+    def forward(self, x, H, W):
+        attn_mask = self.create_mask(x, H, W)  # [nW, Mh*Mw, Mh*Mw]
+        for blk in self.blocks:
+            blk.H, blk.W = H, W
+            if not torch.jit.is_scripting() and self.use_checkpoint:
+                x = checkpoint.checkpoint(blk, x, attn_mask)
+            else:
+                x = blk(x, attn_mask)
+        if self.downsample is not None:
+            x = self.downsample(x, H, W)
+            H, W = (H + 1) // 2, (W + 1) // 2
+
+        return x, H, W
 
 class SwinKANsformerBlock(nn.Module):
     r""" Swin KANsformer Block.
