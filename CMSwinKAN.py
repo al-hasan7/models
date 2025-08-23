@@ -13,8 +13,6 @@ from models import EfficientKAN
 from models.EfficientKAN import KAN, KANLinear
 import torch.utils.checkpoint as checkpoint
 
-#sys.path.append(os.path.abspath('CMSwinKAN/src'))
-#from efficient_kan.kan import KAN 
 
 
 class CBR(nn.Module):
@@ -754,7 +752,6 @@ class SwinKANsformerBlock(nn.Module):
         self.window_size = window_size
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
-        from models.EfficientKAN import KAN
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
         self.norm1 = norm_layer(dim)
