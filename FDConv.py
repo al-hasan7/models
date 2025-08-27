@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 from numpy.linalg import matrix_rank
 from torch.utils.checkpoint import checkpoint
 
+from models.EfficientKAN import KAN
+
 
 class StarReLU(nn.Module):
     """
