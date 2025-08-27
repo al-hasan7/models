@@ -636,3 +636,172 @@ if __name__ == '__main__':
     y = m(x)
     print(y.shape)
     pass
+
+
+
+class FFN(nn.Module): 
+    def __init__(self, input_dim=256, output_dim=256, dropout_rate=0.15):
+        super(FFN, self).__init__()
+        
+        self.fc1 = nn.Linear(input_dim, output_dim) # (256 -> 256)
+        self.gelu = nn.GELU()
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, x):
+        # Input: [B, seq_n, output_dim] -> [B, seq_n, output_dim]
+        x = self.fc1(x)
+        x = self.gelu(x)
+        x = self.dropout(x)
+        return x
+
+
+class FDConvClassifier(nn.Module):
+    def __init__(self, in_channels=3, out_channels=128, kernel_size=3, kernel_num=8, num_classes=8, num_hidden_layers=2, num_heads=4):
+        super(FDConvClassifier, self).__init__()
+        
+        self.num_heads = num_heads
+        self.num_features = out_channels
+        
+        # channels (3 to 128)
+        self.initial_conv = FDConv(in_channels=in_channels, out_channels=out_channels, kernel_size=3, kernel_num=kernel_num)
+        self.initial_conv2 = FDConv(in_channels=in_channels, out_channels=out_channels, kernel_size=4, kernel_num=kernel_num)
+
+        
+        # FDConv modules
+        self.fdconv1 = FDConv(in_channels=out_channels, out_channels=out_channels, kernel_size=3, kernel_num=kernel_num)
+        self.fdconv2 = FDConv(in_channels=out_channels, out_channels=out_channels, kernel_size=3, kernel_num=kernel_num)
+        
+        self.fdconv11 = FDConv(in_channels=out_channels, out_channels=out_channels, kernel_size=4, kernel_num=kernel_num)
+        self.fdconv22 = FDConv(in_channels=out_channels, out_channels=out_channels, kernel_size=4, kernel_num=kernel_num)
+        
+        self.pool = nn.MaxPool2d(8, 8)
+        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.flatten = nn.Flatten()
+        
+        # Depthwise 1D Convolutions for Q, K, V projections
+        self.qkv_proj = nn.Conv1d(in_channels=256, out_channels=256, kernel_size=3, padding='same', dilation=3, groups=256)
+    
+        self.attn = nn.MultiheadAttention(embed_dim=256, num_heads=self.num_heads, batch_first=True)
+        
+        self.hidden_layers = FFN(input_dim=256, output_dim=256, dropout_rate=0.15)
+        
+        # KAN classification head
+        self.head = KAN([256, 16, num_classes]) if num_classes > 0 else nn.Identity()
+        
+    def forward(self, x):
+        
+        # [B, H, W, C] --> [B, C, H, W]
+        x = x.permute(0, 3, 1, 2) 
+        
+        # Initial Conv Layer
+        x1 = self.initial_conv(x)  # Output shape: torch.Size([-1, 128, 126, 126])
+        print('Shape x1: ', x1.shape)
+        
+        # First FDConv Layer
+        x2 = self.fdconv1(x1)  # Output shape: torch.Size([-1, 128, 124, 124])
+        #print('Shape x2: ', x2.shape)
+
+        x3 = self.fdconv2(x2)  # Output shape: torch.Size([-1, 128, 122, 122])
+        #print('Shape x3: ', x3.shape)
+        
+        # Skip Connection: Upsample x2 to match the shape of x1
+        up1 = F.interpolate(x2, size=x1.shape[2:], mode='bilinear', align_corners=False)
+        #print('up1: ', up1.shape)
+
+        
+        # Skip Connection: Upsample x3 to match the shape of x1
+        up2 = F.interpolate(x3, size=(x1.shape[2], x1.shape[3]), mode='bilinear', align_corners=False)
+        #print('up2: ', up2.shape)
+
+        skip1 = up1 + up2 + x1 
+        #print('Skip_1: ', skip1.shape) #--> torch.Size([-1, 128, 126, 126])
+
+
+        #--------------------------------------------------------------------------------------------------------------
+        # Initial Conv Layer
+        x11 = self.initial_conv2(x)  # Output shape: torch.Size([-1, 128, 125, 125])
+        #print('Shape x11: ', x11.shape)
+        
+        # First FDConv Layer
+        x22 = self.fdconv11(x11)  # Output shape: torch.Size([-1, 128, 123, 123])
+        #print('Shape x22: ', x22.shape)
+
+        x33 = self.fdconv22(x22)  # Output shape: torch.Size([-1, 128, 121, 121])
+        #print('Shape x33: ', x33.shape)
+        
+        # Skip Connection: Upsample x2 to match the shape of x1
+        up11 = F.interpolate(x22, size=x11.shape[2:], mode='bilinear', align_corners=False)
+        #print('up11: ', up11.shape)
+
+        
+        # Skip Connection: Upsample x3 to match the shape of x1
+        up22 = F.interpolate(x33, size=(x11.shape[2], x11.shape[3]), mode='bilinear', align_corners=False)
+        #print('up22: ', up22.shape)
+
+        skip11 = up11 + up22 + x11 
+        #print('Skip_1: ', skip11.shape) #--> torch.Size([-1, 256, 125, 125])
+
+        #-------------------------------------------------------------------------------
+
+        
+
+        sp1 = self.pool(skip1) 
+        #print('Skip_1 pool shape: ', sp.shape) #--> torch.Size([-1, 128, 15, 15])
+        sp2 = self.pool(skip11) 
+        #print('Skip_1 pool shape: ', sp.shape) #--> torch.Size([-1, 128, 15, 15])
+        concate = torch.cat((sp1,sp2), dim=1)
+        #print('Concate shape: ', concate.shape) concate.shape) #--> torch.Size([-1, 128*2, 15, 15])
+        
+
+        
+        # Project Q, K, V using depthwise 1D convolutions
+        x4_flat = concate.view(concate.shape[0], concate.shape[1], -1)  # [B, C, W*H]
+        x4_flat_norm = F.layer_norm(x4_flat, x4_flat.shape[1:])
+        #print('Shape x4_flatten: ', x4_flat_norm.shape) # torch.Size([8, 256, 225])
+        
+        q = self.qkv_proj(x4_flat_norm).transpose(1, 2)  # [B, W*H, C]
+        k = self.qkv_proj(x4_flat_norm).transpose(1, 2)  # [B, W*H, C]
+        v = self.qkv_proj(x4_flat_norm).transpose(1, 2)  # [B, W*H, C]
+        #print('qkv Shapes: ', q.shape, k.shape, v.shape) #--> torch.Size([8, 225, 256])
+        
+        # Apply Multi-Head Attention
+        attn_out, _ = self.attn(q, k, v)  # [B, W*H, C]
+
+        # Skip connection with normalized input
+        att_skip = attn_out + x4_flat_norm.transpose(1, 2)  # [B, W*H, C]
+        #print('att_skip shape: ', att_skip.shape)
+        
+        # Apply layer norm - FIXED: Use att_skip instead of skip1
+        norm = F.layer_norm(att_skip, att_skip.shape[1:])  # [B, W*H, C]
+        
+        # Apply FFN hidden layers
+        ffn = self.hidden_layers(norm)  # [B, W*H, C]
+        #print('FFN shape: ', ffn.shape)
+        
+        # Skip connection
+        att_skip2 = ffn + norm  # [B, W*H, C]
+        #print('att_skip2 shape: ', att_skip2.shape)
+
+        # Apply global average pooling to the attention output
+        # att_skip2 has shape [B, 225, 256], we need to aggregate over the sequence dimension
+        reshape = ffn.view(concate.shape[0], concate.shape[1], concate.shape[2], concate.shape[3])
+        pooled = avg = self.global_avg_pool(reshape) #torch.mean(att_skip2, dim=1) #  # Average over sequence dimension -> [B, 256]
+        #print('average pooled shape: ', pooled.shape)
+        C = self.flatten(avg)
+        #print('flatten shape: ', C.shape)
+        
+        # Apply classification head
+        x = self.head(C)  # [B, num_classes]
+
+        return x
+
+
+from torchsummary import summary
+import torch
+
+# Recreate the model from scratch
+model = FDConvClassifier(in_channels=3, out_channels=128, kernel_size=3, kernel_num=8, num_classes=8, num_hidden_layers=3, num_heads=4)
+model = model.to(device)
+
+# Print the summary of the model
+summary(model, input_size=(128, 128, 3))  # Input size for (channels, height, width)
