@@ -802,8 +802,8 @@ from torchsummary import summary
 import torch
 
 # Recreate the model from scratch
-model = FDConvClassifier(in_channels=3, out_channels=128, kernel_size=3, kernel_num=8, num_classes=8, num_hidden_layers=3, num_heads=4)
-model = model.to(device)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = FDConvClassifier(in_channels=3, out_channels=128, kernel_size=3, kernel_num=8, num_classes=8, num_hidden_layers=3, num_heads=4).to(device)
 
 # Print the summary of the model
 summary(model, input_size=(128, 128, 3))  # Input size for (channels, height, width)
